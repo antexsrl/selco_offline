@@ -1,6 +1,6 @@
 # Stampa bindelli SEZ1 con VPN non disponibile — documento di progetto
 
-Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026
+Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 2: lettura del log e registrazioni di produttività)
 
 ## 1. Contesto e problema
 
@@ -101,6 +101,8 @@ Stampanti usate (utente Odoo `sezselco`): `Brother_HL-L6450DW_series` per i bind
 | D8 | **Anche le etichette ZPL** escono a VPN giù. |
 | D9 | **La stampa manuale è bloccata** (procedura guidata, solo anteprima) per i bindelli presenti nella fotografia attiva del logger. Il gruppo *Superuser labels* può forzarla e la forzatura resta registrata. |
 | D10 | Il calcolo dei bindelli è scritto **una sola volta**, come funzione Python senza database, usata sia da Odoo sia dal logger. |
+| D11 | La lettura di `Event.log` usa il motore incrementale di `event_new_copy_v2.py` (§9): legge solo i byte nuovi, non tiene il file aperto, reagisce in circa 2 secondi. |
+| D12 | Le registrazioni di produttività e fermo inviate a Odoo vengono ricalcolate con un nuovo algoritmo (§10), che assegna il tempo al programma che produce pannelli ed elimina i record a tempo zero. |
 
 ## 4. Architettura
 
@@ -135,7 +137,8 @@ selco_offline/
 ├── docs/                       questo documento
 ├── odoo/antex_label_offline/   modulo Odoo (copia; i test girano da addons_antex_skilled)
 ├── logger/                     evoluzione di loggerselco
-└── shared/label_allocation.py  calcolo dei bindelli, senza database
+├── shared/label_allocation.py  calcolo dei bindelli, senza database
+└── tools/replay/               banco di prova: rigioca un Event.log reale con un Odoo finto
 ```
 
 `shared/label_allocation.py` è l'unica copia del calcolo. Il modulo Odoo e il logger ne includono una
@@ -288,6 +291,8 @@ bindelli non stampati in ordine di `sub`.
 | `printing.py` | client IPP verso `http://192.168.20.18:631/printers/<coda>`: invia il documento letto dalla share (in memoria, senza file temporanei) con le opzioni del lavoro |
 | `journal.py` | registro sulla share, invio a Odoo, stato locale = fotografia + registro |
 | `selco.py` | alla riga `PRODUCED PIECE`, il vecchio `print_layout_labels_from_cutting_plan()` viene sostituito dal flusso della §8.2 |
+| `eventlog.py` | lettura incrementale di `Event.log` (§9), al posto di `prepare_eventfile()` / `process_eventfile()` |
+| `productivity.py` | nuovo algoritmo delle registrazioni di produttività e fermo (§10), al posto di `close_programs()` e dei rami relativi di `process_buffer()` |
 
 Le opzioni dei lavori sono le stesse che `lp -o` passerebbe a CUPS (`InputSlot`, `page-ranges`, `Duplex`,
 `copies`). Il client IPP va verificato con una stampa di prova da cassetto `TRAY2` prima di tutto il resto.
@@ -333,7 +338,141 @@ sequenceDiagram
 Se una stampa via IPP fallisce, la voce di registro riporta l'errore e il bindello non viene considerato
 stampato, né dal logger né da Odoo. Resta disponibile per lo schema successivo, come oggi.
 
-## 9. Casi particolari
+## 9. Lettura di `Event.log`
+
+### 9.1 Oggi
+
+Ogni 60 secondi `prepare_eventfile()` copia per intero `EvtBack.log` e `Event.log` in `event_tmp.log` sul
+disco del PC. `process_eventfile()` rilegge poi il file dal fondo fino all'ultima riga già elaborata.
+`EvtBack.log` copre circa tre settimane (8–28/05/2026: 101.868 righe, 6,7 MB), quindi a ogni ciclo si
+copiano quasi 10 MB per trovare poche righe nuove. Il file viene aperto mentre il software OSI lo scrive:
+il log errori riporta frequenti `Permission denied` su `Event.log`.
+
+### 9.2 Motore incrementale (da `event_new_copy_v2.py`)
+
+Dallo script `event_new_copy_v2.py` (metodo `tail_windows_copy_method`) prendiamo:
+
+- **nessun file tenuto aperto:** ogni 0,5 s si guarda solo la dimensione del file (`os.path.getsize`);
+- **solo i byte nuovi:** se il file è cresciuto (al massimo ogni 2 s), lo si apre per il tempo di una
+  `seek` + `read` dalla posizione precedente;
+- **righe incomplete:** l'ultima riga senza a capo resta in un buffer e si completa alla lettura successiva;
+- **file troncato o ricreato:** se la dimensione cala, si riparte da capo;
+- il parser `format_event()`, che trasforma le righe in eventi (`start_program`, `produced_piece`,
+  `boards_done`).
+
+Il risultato: `PRODUCED PIECE` viene visto in circa 2 secondi invece che fino a 60, quindi i bindelli escono
+prima, e per ogni lettura si leggono pochi byte invece di 10 MB.
+
+### 9.3 Cosa cambia rispetto allo script
+
+| Nello script | Nel logger |
+|---|---|
+| All'avvio salta il contenuto esistente (`tail -f`): gli eventi scritti mentre il logger era spento vanno persi | posizione (byte) e ultima riga elaborata salvate nello stato; al riavvio si riprende da lì |
+| Rotazione riconosciuta solo se il file si accorcia | alla rotazione si leggono prima le righe mancanti in coda a `EvtBack.log` (cercando l'ultima riga elaborata), poi `Event.log` dall'inizio; per riconoscere la rotazione si controlla anche la prima riga del file, non solo la dimensione |
+| Byte nuovi scritti in un file temporaneo e riletti | decodifica direttamente in memoria (UTF-8: il log contiene `più`), nessun file sul disco |
+| Eventi pubblicati su MQTT (192.168.111.9) | eventi passati al logger; la pubblicazione MQTT resta possibile in un secondo momento, con lo stesso formato |
+| `format_event()` scarta `Message`, `Session`, `State`, stop | servono al logger (allarmi, fermi, sessioni): il parser viene esteso a questi tipi |
+
+## 10. Registrazioni di produttività e fermo
+
+### 10.1 Il problema: registrazioni a tempo zero
+
+Il logger crea in Odoo le registrazioni di produttività (`mrp.workcenter.productivity`), di lavoro o di
+fermo. Capita che arrivino registrazioni con durata zero, soprattutto dopo stop ed emergenze.
+
+Per misurarlo abbiamo fatto girare `selco.py` così com'è sui log reali della macchina, con un Odoo finto
+che registra le chiamate (strumento in `tools/replay/`):
+
+| Log | Periodo | Registrazioni | A tempo zero | di cui con pannelli |
+|---|---|---|---|---|
+| `EventOsi.log` | 28/10–03/11/2025 | 400 | 24 | 12 |
+| `EvtBack.log` | 08/05–28/05/2026 | 1.174 | 42 | 13 |
+| `Event.log` | 28/05–08/06/2026 | 475 | 18 | 6 |
+
+Tutte le registrazioni a tempo zero sono di lavoro, e 82 su 84 vengono aperte e chiuse dalla stessa riga
+del log. I motivi sono due, più un terzo difetto emerso dall'analisi.
+
+**1. Chiusura a cascata dei programmi in coda.** La Selco scrive `Start program` quando carica un
+programma nella distinta, anche mentre sta ancora tagliando il precedente. Il logger quindi ha di solito più
+programmi aperti. Su `Stop worklist`, `Emergency`, `End Session`, o quando arrivano pannelli di un programma
+successivo, `close_programs()` li chiude tutti. Per ciascuno dopo il primo apre una registrazione e la
+chiude nello stesso secondo.
+
+Esempio (29/05/2026, emergenza alle 06:26:04):
+
+| Registrazione | Programma | Inizio | Fine | Pannelli |
+|---|---|---|---|---|
+| 321 | PE2600996_2_31.010 | 06:24:03 | 06:26:04 | 0 |
+| 325 | PE2600996_2_31.011 | 06:26:04 | 06:26:04 | 0 ← in coda, mai tagliato in quell'intervallo |
+| 326 | fermo | 06:26:04 | 06:39:44 | – |
+
+**2. Programma interrotto che resta "aperto".** Allo stop, `keep_open=True` conserva i programmi. Alla
+ripartenza il tempo va al primo della lista, anche se l'operatore ha cambiato programma. Esempio del
+29/05/2026:
+
+| Ora | Log | Cosa registra il logger |
+|---|---|---|
+| 07:37:07 | `Start program` PE2601001_2_0.001 | lavoro su PE2601001 |
+| 07:37:32 | `Stop worklist` | fermo |
+| 07:38:03 | `Start program` PE2600995_4_01.001 + `Start worklist` | lavoro su **PE2601001** (il programma interrotto) |
+| 07:50:37 | `Boards done` 5 di PE2600995_4_01.001 (completo) | chiude PE2601001 (12 min 34 s, 0 pannelli); apre e chiude PE2600995 **a tempo zero con 5 pannelli** |
+
+Il tempo di lavoro del programma vero finisce su un programma che non ha prodotto nulla.
+
+**3. Fermi persi.** Se uno `Stop worklist` arriva subito dopo la fine di un programma, la lista dei
+programmi aperti è vuota e il fermo non viene aperto. Il 04/06/2026 lo stop delle 14:19:38 è durato fino
+alle 15:58:00, ma non compare in nessuna registrazione.
+
+Gli allarmi OSI monitorati (`MSG_TO_MONITOR`) sono un tema separato. Il controllo sulla durata minima
+(`max_time`) è commentato, quindi ogni allarme crea uno stato macchina: nei tre log, 2.936 stati su 5.295
+(55%) durano meno della soglia prevista. Solo il 2% dura un secondo o meno.
+
+### 10.2 Nuovo algoritmo: il tempo va a chi produce
+
+Il segnale affidabile di quale programma la macchina sta lavorando è `Boards done`, non `Start program`.
+
+| # | Regola |
+|---|---|
+| R1 | Una registrazione di lavoro si apre al **primo `Boards done`** di un programma e parte dal momento in cui è finito il lavoro precedente (fine del programma precedente o ripartenza dopo un fermo). I programmi caricati in distinta che non producono nulla non generano registrazioni. |
+| R2 | **Passaggio di consegne:** se arrivano pannelli del programma B mentre è aperto A, A si chiude all'ora del suo **ultimo pannello** e B parte da lì. |
+| R3 | Quando `done` raggiunge `to do`, la registrazione si chiude su quel pannello. |
+| R4 | `Stop program`, `Stop worklist` ed `Emergency` chiudono la registrazione aperta e aprono **sempre** un fermo, anche senza programmi aperti. Se dall'ultima ripartenza non è uscito nessun pannello, quel tempo va all'ultimo programma avviato, con 0 pannelli (programma interrotto). |
+| R5 | `Start worklist`, `Restart worklist`, `Start program` o un pannello chiudono il fermo. |
+| R6 | `End Session` chiude tutto senza aprire un fermo. Un `Init Session` senza `End Session` (spegnimento anomalo) chiude ciò che è aperto all'**ora dell'ultimo evento letto**, non all'ora di riaccensione. |
+| R7 | Una registrazione con durata zero e zero pannelli non viene mai inviata a Odoo. |
+| R8 | Il contatore dei pannelli di ogni programma si riallinea al valore `done:` scritto in ogni `Start program`. |
+| R9 | Stati da allarme OSI: si crea lo stato solo se l'allarme dura almeno `max_time` (il controllo oggi commentato). |
+
+Le chiamate a Odoo restano quelle di oggi (`create_productivity`, `add_sez_pack`, `close_productivity`,
+`create_wcstate`, `close_wcstate`): cambia solo quando e con quali date vengono fatte.
+
+### 10.3 Risultato sui log reali
+
+Prototipo in `tools/replay/engine.py` (regole R1–R8), confrontato con `selco.py` sugli stessi log:
+
+| Log | Algoritmo | Lavoro | Fermo | A tempo zero | Minuti di lavoro senza pannelli | Pannelli | Minuti lavoro | Minuti fermo |
+|---|---|---|---|---|---|---|---|---|
+| EventOsi | attuale | 353 | 47 | 24 | 106 | 2.425 | 1.982 | 912 |
+| | nuovo | 332 | 64 | **2** | **46** | 2.435 | 1.992 | 943 |
+| EvtBack | attuale | 947 | 227 | 42 | 181 | 10.582 | 6.916 | 1.635 |
+| | nuovo | 902 | 263 | **8** | **117** | 10.599 | 6.963 | 1.715 |
+| Event | attuale | 405 | 70 | 18 | 107 | 4.588 | 3.211 | 317 |
+| | nuovo | 386 | 94 | **2** | **56** | 4.603 | 3.226 | 465 |
+
+- Le registrazioni a tempo zero passano da 84 a 12.
+- I minuti di lavoro assegnati a programmi senza pannelli si dimezzano circa (da 394 a 219).
+- Più registrazioni di fermo e più minuti: sono i fermi che l'algoritmo attuale perde (caso 3).
+- Pannelli leggermente di più: l'algoritmo attuale scarta i pannelli dei programmi che non ha visto
+  partire (`Program … not loaded but boards produced`).
+
+Le 12 registrazioni a zero rimaste hanno tutte dei pannelli. Sono tagli fatti in manuale durante un fermo
+(esempio: 04/06/2026 09:43:08, comandi `IO Force` durante il fermo, poi `Boards done` 4 che completa il
+programma). Restano, perché portano i pannelli.
+
+Con il nuovo algoritmo la registrazione di lavoro compare in Odoo al primo pannello, non all'avvio del
+programma: qualche minuto dopo rispetto a oggi.
+
+## 11. Casi particolari
 
 | Caso | Comportamento |
 |---|---|
@@ -345,18 +484,19 @@ stampato, né dal logger né da Odoo. Resta disponibile per lo schema successivo
 | Stesso programma ripetuto | il logger stampa una volta sola per programma (flag `label_printed` in `activeprogram.json`, come oggi) |
 | Schema tagliato anche su SEZ (altro sito) durante il guasto | non visibile al logger; la differenza si recupera allo schema successivo |
 
-## 10. Piano di lavoro
+## 12. Piano di lavoro
 
 | Fase | Contenuto | Verifica |
 |---|---|---|
 | F0 | Portare in produzione la correzione di `oi_mrp_label` 12.0.32.0.0 | test del modulo; controllo sulla riga segnalata |
 | F1 | `oi_mrp_label` / `antex_jit_label`: istruzioni di stampa separate dalla stampa, `allocate()` condiviso — nessun cambiamento visibile | test: stessi lavori per ogni caso della tabella 2.2 |
 | F2 | Modulo `antex_label_offline`: metodi RPC, fotografia con impronte, registro, allerte, blocco della stampa manuale | test su `antex12test` |
+| F2b | Logger: lettura incrementale di `Event.log` (§9) e nuovo algoritmo di produttività (§10). Indipendente dalla stampa offline: si può mettere in servizio prima | `tools/replay` sui log reali: nessuna registrazione a tempo zero senza pannelli, stessi pannelli, stessi minuti totali; riavvio del logger e rotazione del log senza righe perse o doppie |
 | F3 | Logger: stampa IPP verso 192.168.20.18 con `offline_print_layout` (solo VPN attiva) | stampa di prova con `TRAY2`, fronte/retro, copie; confronto con la stampa attuale |
 | F4 | Logger: fotografia sulla share, calcolo a VPN giù, registro, sincronizzazione | simulazione di VPN giù (Odoo irraggiungibile) su un lotto di schemi reali |
 | F5 | Messa in servizio su SEZ1 | una settimana di confronto tra registro e stato di Odoo |
 
-## 11. Punti aperti
+## 13. Punti aperti
 
 1. Percorso della share OpenMediaVault e utenza con cui il logger la monta.
 2. Criterio degli schemi nella fotografia: proposta *piano stampato, schema non stampato, ultimi 7
@@ -365,3 +505,9 @@ stampato, né dal logger né da Odoo. Resta disponibile per lo schema successivo
    turno, quando arrivano i piani nuovi.
 4. Versione di Python e librerie disponibili sul PC Windows (client IPP).
 5. Destinatari delle allerte: solo menu, oppure anche un'attività a un responsabile?
+6. Soglie `max_time` degli allarmi OSI (R9): quelle di `MSG_TO_MONITOR` (30 s, 0 s per le lame) vanno
+   bene? Oggi non sono applicate.
+7. È accettabile che la registrazione di lavoro compaia in Odoo al primo pannello invece che all'avvio del
+   programma (§10.3)?
+8. Tempo tra ripartenza e primo pannello di un programma poi interrotto (R4): all'ultimo programma avviato,
+   come proposto, o al fermo?
