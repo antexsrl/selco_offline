@@ -1,0 +1,4 @@
+OdooRPC==0.10.1
+PySide2==5.15.2.1
+pytz==2024.1
+shiboken2==5.15.2.1

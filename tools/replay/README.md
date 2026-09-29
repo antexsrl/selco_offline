@@ -1,7 +1,7 @@
 # Banco di prova: registrazioni di produttività
 
 Rigioca un `Event.log` reale della Selco e confronta le registrazioni di produttività/fermo prodotte da
-`selco.py` (loggerselco) con quelle del nuovo algoritmo (`engine.py`). Vedi `docs/progetto.md` §10.
+`selco.py` (loggerselco) con quelle del nuovo logger (`engine.py`, che usa `logger/productivity.py`). Vedi `docs/progetto.md` §10.
 
 ```bash
 # algoritmo attuale: usa il virtualenv di loggerselco (odoorpc, pytz, ...) e scrive selco_records.json

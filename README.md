@@ -12,6 +12,6 @@ disponibile.
 |---|---|
 | `docs/` | documentazione di progetto |
 | `odoo/antex_label_offline/` | modulo Odoo 12 (copia; i test girano da `addons_antex_skilled`) |
-| `logger/` | evoluzione di Selco Logger (PC Windows della sezionatrice) |
+| `logger/` | evoluzione di Selco Logger (PC Windows della sezionatrice): lettura incrementale del log, registrazioni di produttività R1–R10, coda verso Odoo — vedi [logger/README.md](logger/README.md) |
 | `shared/` | calcolo dei bindelli senza database, usato da Odoo e dal logger |
 | `tools/replay/` | banco di prova: rigioca un `Event.log` reale e confronta le registrazioni di produttività |

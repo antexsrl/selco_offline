@@ -1,6 +1,6 @@
 # Stampa bindelli SEZ1 con VPN non disponibile — documento di progetto
 
-Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 3: regole R4, R9, R10 decise)
+Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 4: fase F2b implementata in `logger/`)
 
 ## 1. Contesto e problema
 
@@ -450,18 +450,19 @@ Le chiamate a Odoo restano quelle di oggi (`create_productivity`, `add_sez_pack`
 
 ### 10.3 Risultato sui log reali
 
-Prototipo in `tools/replay/engine.py` (regole R1–R8 e R10), confrontato con `selco.py` sugli stessi log:
+Motore del nuovo logger (`logger/productivity.py`, regole R1–R10), rigiocato con `tools/replay/engine.py` e
+confrontato con `selco.py` sugli stessi log. Gli stati da allarme passano da 5.295 a 2.362 per effetto di R9.
 
 | Log | Algoritmo | Registrazioni (lavoro / fermo) | Sotto 1 minuto | A tempo zero | Minuti di lavoro senza pannelli | Pannelli | Minuti lavoro | Minuti fermo |
 |---|---|---|---|---|---|---|---|---|
 | EventOsi | attuale | 400 (353 / 47) | 66 | 24 | 106 | 2.425 | 1.982 | 912 |
 | | nuovo | **321** (305 / 16) | **1** | **1** | **5** | 2.435 | 2.016 | 909 |
 | EvtBack | attuale | 1.174 (947 / 227) | 274 | 42 | 181 | 10.582 | 6.916 | 1.635 |
-| | nuovo | **804** (739 / 65) | **4** | **4** | **0** | 10.599 | 7.055 | 1.596 |
+| | nuovo | **804** (739 / 65) | **4** | **4** | **0** | 10.599 | 7.055 | 1.595 |
 | Event | attuale | 475 (405 / 70) | 85 | 18 | 107 | 4.588 | 3.211 | 317 |
 | | nuovo | **357** (339 / 18) | **2** | **1** | **0** | 4.603 | 3.277 | 410 |
 | **Totale** | attuale | 2.049 | 425 | 84 | 394 | 17.595 | 12.109 | 2.864 |
-| | nuovo | **1.482 (−28%)** | **7** | **6** | **5** | 17.637 | 12.348 | 2.915 |
+| | nuovo | **1.482 (−28%)** | **7** | **6** | **5** | 17.637 | 12.348 | 2.914 |
 
 - Le registrazioni calano del 28% e quelle sotto il minuto passano da 425 a 7.
 - Nessun fermo di almeno 3 minuti dell'algoritmo R1–R8 va perso con R10 (verificato su tutti e tre i log).
@@ -500,7 +501,7 @@ Scelte valutate e scartate per R4 e R10:
 | F0 | Portare in produzione la correzione di `oi_mrp_label` 12.0.32.0.0 | test del modulo; controllo sulla riga segnalata |
 | F1 | `oi_mrp_label` / `antex_jit_label`: istruzioni di stampa separate dalla stampa, `allocate()` condiviso — nessun cambiamento visibile | test: stessi lavori per ogni caso della tabella 2.2 |
 | F2 | Modulo `antex_label_offline`: metodi RPC, fotografia con impronte, registro, allerte, blocco della stampa manuale | test su `antex12test` |
-| F2b | Logger: lettura incrementale di `Event.log` (§9) e nuovo algoritmo di produttività (§10, R1–R10). Indipendente dalla stampa offline: si può mettere in servizio prima | `tools/replay` sui log reali: nessuna registrazione a tempo zero senza pannelli, nessun fermo ≥ 3 minuti perso, pannelli non inferiori a oggi; riavvio del logger e rotazione del log senza righe perse o doppie |
+| F2b ✅ | Logger: lettura incrementale di `Event.log` (§9) e nuovo algoritmo di produttività (§10, R1–R10). Indipendente dalla stampa offline: si può mettere in servizio prima. **Implementata** in `logger/` (vedi `logger/README.md`); da provare contro un Odoo reale prima della messa in servizio | `tools/replay` sui log reali: nessuna registrazione a tempo zero senza pannelli, nessun fermo ≥ 3 minuti perso, pannelli non inferiori a oggi; riavvio del logger e rotazione del log senza righe perse o doppie |
 | F3 | Logger: stampa IPP verso 192.168.20.18 con `offline_print_layout` (solo VPN attiva) | stampa di prova con `TRAY2`, fronte/retro, copie; confronto con la stampa attuale |
 | F4 | Logger: fotografia sulla share, calcolo a VPN giù, registro, sincronizzazione | simulazione di VPN giù (Odoo irraggiungibile) su un lotto di schemi reali |
 | F5 | Messa in servizio su SEZ1 | una settimana di confronto tra registro e stato di Odoo |
