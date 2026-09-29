@@ -40,6 +40,14 @@ class MainWindow(QWidget):
 
         self.tbfilebkp = QLineEdit()
 
+        self.tbmqtthost = QLineEdit()
+        self.tbmqttport = QLineEdit()
+        self.tbmqttport.setValidator(QIntValidator(0, 65535, self))
+        self.tbmqtttopic = QLineEdit()
+        self.tbmqttuser = QLineEdit()
+        self.tbmqttpassword = QLineEdit()
+        self.tbmqttpassword.setEchoMode(QLineEdit.Password)
+
         buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttonBox.accepted.connect(self.on_ok_triggered)
         buttonBox.rejected.connect(self.on_cancel_triggered)
@@ -54,6 +62,11 @@ class MainWindow(QWidget):
         layout.addRow(QLabel('Password:'),self.tbdbpassword)
         layout.addRow(QLabel('Workcenter code:'),self.tbwccode)
         layout.addRow(QLabel('Update interval (secs):'),self.tbinterval)
+        layout.addRow(QLabel('MQTT broker (empty: off):'),self.tbmqtthost)
+        layout.addRow(QLabel('MQTT port:'),self.tbmqttport)
+        layout.addRow(QLabel('MQTT topic:'),self.tbmqtttopic)
+        layout.addRow(QLabel('MQTT user:'),self.tbmqttuser)
+        layout.addRow(QLabel('MQTT password:'),self.tbmqttpassword)
 
         layout.addWidget(buttonBox)
 
@@ -128,7 +141,13 @@ class MainWindow(QWidget):
         config.workcenter_code = self.tbwccode.text()
         config.interval = int(self.tbinterval.text())
         config.filebkp = self.tbfilebkp.text()
+        config.mqtt_host = self.tbmqtthost.text()
+        config.mqtt_port = int(self.tbmqttport.text() or 1883)
+        config.mqtt_topic = self.tbmqtttopic.text()
+        config.mqtt_user = self.tbmqttuser.text()
+        config.mqtt_password = self.tbmqttpassword.text()
         config.save()
+        selco_obj.mqtt.reconfigure()
         self.hide()
 
     def on_cancel_triggered(self):
@@ -153,9 +172,15 @@ class MainWindow(QWidget):
         self.tbwccode.setText(config.workcenter_code)
         self.tbinterval.setText(f'{config.interval}')
         self.tbfilebkp.setText(config.filebkp)
+        self.tbmqtthost.setText(config.mqtt_host)
+        self.tbmqttport.setText(f'{config.mqtt_port}')
+        self.tbmqtttopic.setText(config.mqtt_topic)
+        self.tbmqttuser.setText(config.mqtt_user)
+        self.tbmqttpassword.setText(config.mqtt_password)
         self.show()
 
     def on_quit_triggered(self):
+        selco_obj.stop()
         QApplication.quit()
 
     def poll(self):

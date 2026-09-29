@@ -1,6 +1,6 @@
 # Stampa bindelli SEZ1 con VPN non disponibile — documento di progetto
 
-Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 4: fase F2b implementata in `logger/`)
+Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 5: MQTT di `event_new_copy_v2.py` integrato nel logger)
 
 ## 1. Contesto e problema
 
@@ -103,6 +103,7 @@ Stampanti usate (utente Odoo `sezselco`): `Brother_HL-L6450DW_series` per i bind
 | D10 | Il calcolo dei bindelli è scritto **una sola volta**, come funzione Python senza database, usata sia da Odoo sia dal logger. |
 | D11 | La lettura di `Event.log` usa il motore incrementale di `event_new_copy_v2.py` (§9): legge solo i byte nuovi, non tiene il file aperto, reagisce in circa 2 secondi. |
 | D12 | Le registrazioni di produttività e fermo inviate a Odoo vengono ricalcolate con un nuovo algoritmo (§10), che assegna il tempo al programma che produce pannelli ed elimina i record a tempo zero. |
+| D14 | Il logger sostituisce anche `event_new_copy_v2.py`: pubblica gli stessi messaggi MQTT sul broker del sito (192.168.20.9, topic `sez/selco`), usato da un LXC nella stessa rete. Broker e consumatore sono sul sito, quindi MQTT funziona anche a VPN giù (§9.3). |
 | D13 | Obiettivo delle registrazioni: **meno registrazioni, meno frammentate**. Un fermo sotto i 3 minuti non spezza il lavoro (R10); il tempo di un programma interrotto senza pannelli va al fermo (R4); gli stati da allarme OSI rispettano `max_time` (R9). La registrazione di lavoro compare in Odoo al primo pannello, il fermo dopo 3 minuti. |
 
 ## 4. Architettura
@@ -117,6 +118,8 @@ flowchart LR
         PC["PC Windows<br/>Selco Logger"]
         OMV[("Share OpenMediaVault<br/>fotografia, PDF, ZPL, registro")]
         CUPS["VM CUPS<br/>192.168.20.18"]
+        MQTT["Broker MQTT<br/>192.168.20.9"]
+        LXC["LXC consumatore"]
         BRO["Brother HL-L6450DW<br/>bindelli A4"]
         ARG["Argox P4-250 SEZ1<br/>etichette ZPL"]
     end
@@ -124,6 +127,8 @@ flowchart LR
     PC <-- "JSON-RPC (VPN)" --> ODOO
     PC <-- "SMB" --> OMV
     PC -- "IPP" --> CUPS
+    PC -- "MQTT" --> MQTT
+    MQTT --> LXC
     CUPS --> BRO
     CUPS --> ARG
 ```
@@ -294,6 +299,7 @@ bindelli non stampati in ordine di `sub`.
 | `selco.py` | alla riga `PRODUCED PIECE`, il vecchio `print_layout_labels_from_cutting_plan()` viene sostituito dal flusso della §8.2 |
 | `eventlog.py` | lettura incrementale di `Event.log` (§9), al posto di `prepare_eventfile()` / `process_eventfile()` |
 | `productivity.py` | nuovo algoritmo delle registrazioni di produttività e fermo (§10), al posto di `close_programs()` e dei rami relativi di `process_buffer()` |
+| `mqtt_publisher.py` | messaggi MQTT di `event_new_copy_v2.py` sul broker del sito (D14) |
 
 Le opzioni dei lavori sono le stesse che `lp -o` passerebbe a CUPS (`InputSlot`, `page-ranges`, `Duplex`,
 `copies`). Il client IPP va verificato con una stampa di prova da cassetto `TRAY2` prima di tutto il resto.
@@ -371,7 +377,7 @@ prima, e per ogni lettura si leggono pochi byte invece di 10 MB.
 | All'avvio salta il contenuto esistente (`tail -f`): gli eventi scritti mentre il logger era spento vanno persi | posizione (byte) e ultima riga elaborata salvate nello stato; al riavvio si riprende da lì |
 | Rotazione riconosciuta solo se il file si accorcia | alla rotazione si leggono prima le righe mancanti in coda a `EvtBack.log` (cercando l'ultima riga elaborata), poi `Event.log` dall'inizio; per riconoscere la rotazione si controlla anche la prima riga del file, non solo la dimensione |
 | Byte nuovi scritti in un file temporaneo e riletti | decodifica direttamente in memoria (UTF-8: il log contiene `più`), nessun file sul disco |
-| Eventi pubblicati su MQTT (192.168.111.9) | eventi passati al logger; la pubblicazione MQTT resta possibile in un secondo momento, con lo stesso formato |
+| Eventi pubblicati su MQTT | stessi messaggi, stesso topic, sul broker del sito 192.168.20.9 (`logger/mqtt_publisher.py`); coda in `state.json` mentre il broker non è connesso; scartati i messaggi più vecchi di 2 minuti, perché lo script pubblicava solo eventi nuovi |
 | `format_event()` scarta `Message`, `Session`, `State`, stop | servono al logger (allarmi, fermi, sessioni): il parser viene esteso a questi tipi |
 
 ## 10. Registrazioni di produttività e fermo

@@ -1,6 +1,7 @@
 """Selco saw logger: reads Event.log, builds productivity/block records and label requests, sends them to Odoo.
 
-poll()       every few seconds: new log lines -> engine -> Odoo operation queue (no network)
+poll()       every few seconds: new log lines -> engine -> Odoo operation queue,
+             and the MQTT messages of event_new_copy_v2.py to the broker on the saw site
 sync_odoo()  sends the queue when Odoo is reachable; label requests trigger it at once
 
 Everything needed to resume (log position, engine state, queue) is saved in STATE_FILE after each
@@ -12,12 +13,13 @@ import os
 from datetime import datetime
 
 from eventlog import EventLogReader
-from events import parse_line
+from events import mqtt_event, parse_line
+from mqtt_publisher import MqttPublisher
 from odoo_sync import OdooSync
 from productivity import ProductivityEngine
 
 STATE_FILE = 'state.json'
-STATE_VERSION = 1
+STATE_VERSION = 1   # the mqtt part is optional: older state files load fine
 
 _logger = logging.getLogger(__name__)
 
@@ -47,7 +49,7 @@ def save_state(state, path=STATE_FILE):
 
 class Selco:
 
-    def __init__(self, config, state_path=STATE_FILE, odoo_factory=None):
+    def __init__(self, config, state_path=STATE_FILE, odoo_factory=None, mqtt_factory=None):
         self.config = config
         self.state_path = state_path
         logging.basicConfig(filename=config.logfile, level=logging.INFO,
@@ -56,6 +58,7 @@ class Selco:
         self.reader = EventLogReader(config.file, config.filebkp, state.get('reader'))
         self.engine = ProductivityEngine.from_dict(state.get('engine'))
         self.sync = OdooSync(config, state.get('sync'), odoo_factory=odoo_factory)
+        self.mqtt = MqttPublisher(config, state.get('mqtt'), client_factory=mqtt_factory)
 
     def save(self):
         save_state({
@@ -63,17 +66,26 @@ class Selco:
             'reader': self.reader.to_dict(),
             'engine': self.engine.to_dict(),
             'sync': self.sync.to_dict(),
+            'mqtt': self.mqtt.to_dict(),
         }, self.state_path)
 
     def poll(self, now=None):
         """Read the new lines of the log. Returns the number of lines read."""
+        now = now or datetime.now()
         lines = self.reader.read()
         for line in lines:
             event = parse_line(line)
             if event:
                 self.engine.feed(event)
-        self.engine.tick(now or datetime.now())
+            message = mqtt_event(line)
+            if message:
+                self.mqtt.enqueue(*message)
+        self.engine.tick(now)
         self.sync.enqueue(self.engine.drain_ops())
+        try:
+            self.mqtt.flush(now)
+        except Exception:
+            _logger.exception('MQTT publish failed')
         self.save()
         return len(lines)
 
@@ -84,6 +96,10 @@ class Selco:
         sent = self.sync.flush(now)
         self.save()
         return sent
+
+    def stop(self):
+        self.mqtt.stop()
+        self.save()
 
     def update(self, now=None):
         try:

@@ -4,18 +4,20 @@ import shutil
 import tempfile
 import unittest
 
+from test_mqtt import Config as MqttConfig, FakeClient
 from test_odoo_sync import Config as SyncConfig, FakeOdoo
 from test_productivity import run
 from test_replay import LOGS
 
-from events import parse_line
+from events import mqtt_event, parse_line
+from mqtt_publisher import MAX_AGE
 from odoo_sync import OdooUnreachable
 from selco import Selco
 
 CHUNK = 200
 
 
-class Config(SyncConfig):
+class Config(SyncConfig, MqttConfig):
     pass
 
 
@@ -71,16 +73,24 @@ class TestSelco(unittest.TestCase):
                 raise OdooUnreachable('VPN down')
             return odoo
 
+        broker = FakeClient()
+        broker.connected = True
         self.append([])
-        selco = Selco(self.config, self.state, odoo_factory=factory)
+        selco = Selco(self.config, self.state, odoo_factory=factory, mqtt_factory=lambda: broker)
         selco.poll()   # first run: takes the position at the end of the (empty) log
         chunks = [self.lines[i:i + CHUNK] for i in range(0, len(self.lines), CHUNK)]
+        expected_mqtt = []
         for n, chunk in enumerate(chunks):
             vpn['up'] = not (10 <= n < 20)
             if n == 15:
-                selco = Selco(self.config, self.state, odoo_factory=factory)   # PC restarted
+                selco = Selco(self.config, self.state, odoo_factory=factory,
+                              mqtt_factory=lambda: broker)   # PC restarted
             self.append(chunk)
             now = self.last_time(chunk)
+            # messages older than MAX_AGE when read are dropped, as the script skipped the old log
+            for m in (mqtt_event(l.decode('utf-8', 'replace')) for l in chunk):
+                if m and now - m[0] <= MAX_AGE:
+                    expected_mqtt.append(m[1])
             selco.poll(now)
             selco.sync.retry_after = None
             selco.sync_odoo(now)
@@ -100,6 +110,10 @@ class TestSelco(unittest.TestCase):
         got = [(r['layout'], r['boards']) for r in odoo.records() if r['end']]
         self.assertEqual(got[:len(expected) - 2], expected[:len(expected) - 2])
         self.assertTrue(odoo.labels())
+        # MQTT: the messages of the lines, in order, none left behind
+        self.assertGreater(len(expected_mqtt), 300)
+        self.assertEqual([p[1] for p in broker.published], expected_mqtt)
+        self.assertFalse(selco.mqtt.queue)
 
 
 if __name__ == '__main__':

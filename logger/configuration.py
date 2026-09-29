@@ -14,6 +14,20 @@ DEFAULTPASSWORD = 'password'
 DEFAULTWORKCENTERCODE = 'MCH1'
 DEFAULTINTERVAL = 180
 DEFAULTLOGFILE = 'Error.log'
+# MQTT broker on the saw site (event_new_copy_v2.py); credentials only in configuration.json
+DEFAULTMQTTHOST = '192.168.20.9'
+DEFAULTMQTTPORT = 1883
+DEFAULTMQTTTOPIC = 'sez/selco'
+DEFAULTMQTTUSER = ''
+DEFAULTMQTTPASSWORD = ''
+
+MQTT_DEFAULTS = {
+    'mqtt_host': DEFAULTMQTTHOST,
+    'mqtt_port': DEFAULTMQTTPORT,
+    'mqtt_topic': DEFAULTMQTTTOPIC,
+    'mqtt_user': DEFAULTMQTTUSER,
+    'mqtt_password': DEFAULTMQTTPASSWORD,
+}
 
 
 class Configuration:
@@ -51,6 +65,7 @@ class Configuration:
                 'logfile': DEFAULTLOGFILE,
                 'filebkp': DEFAULTEVENTBKPFILE,
             }
+            c.update(MQTT_DEFAULTS)
 
             c_json = json.dumps(c)
             f.write(c_json)
@@ -68,6 +83,9 @@ class Configuration:
             self.workcenter_code = c['workcenter_code']
             self.interval = c['interval']
             self.logfile = c['logfile']
+            # added with MQTT: older files don't have them
+            for key, default in MQTT_DEFAULTS.items():
+                setattr(self, key, c.get(key, default))
 
 
     def save(self):
@@ -90,6 +108,8 @@ class Configuration:
                 'logfile': self.logfile,
                 'filebkp': self.filebkp,
             }
+            for key in MQTT_DEFAULTS:
+                c[key] = getattr(self, key)
 
             c_json = json.dumps(c)
             f.write(c_json)
