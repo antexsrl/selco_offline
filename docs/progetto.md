@@ -1,6 +1,6 @@
 # Stampa bindelli SEZ1 con VPN non disponibile — documento di progetto
 
-Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 2: lettura del log e registrazioni di produttività)
+Stato: **bozza per revisione** · Ultimo aggiornamento: 30/09/2026 (rev. 3: regole R4, R9, R10 decise)
 
 ## 1. Contesto e problema
 
@@ -103,6 +103,7 @@ Stampanti usate (utente Odoo `sezselco`): `Brother_HL-L6450DW_series` per i bind
 | D10 | Il calcolo dei bindelli è scritto **una sola volta**, come funzione Python senza database, usata sia da Odoo sia dal logger. |
 | D11 | La lettura di `Event.log` usa il motore incrementale di `event_new_copy_v2.py` (§9): legge solo i byte nuovi, non tiene il file aperto, reagisce in circa 2 secondi. |
 | D12 | Le registrazioni di produttività e fermo inviate a Odoo vengono ricalcolate con un nuovo algoritmo (§10), che assegna il tempo al programma che produce pannelli ed elimina i record a tempo zero. |
+| D13 | Obiettivo delle registrazioni: **meno registrazioni, meno frammentate**. Un fermo sotto i 3 minuti non spezza il lavoro (R10); il tempo di un programma interrotto senza pannelli va al fermo (R4); gli stati da allarme OSI rispettano `max_time` (R9). La registrazione di lavoro compare in Odoo al primo pannello, il fermo dopo 3 minuti. |
 
 ## 4. Architettura
 
@@ -436,41 +437,49 @@ Il segnale affidabile di quale programma la macchina sta lavorando è `Boards do
 | R1 | Una registrazione di lavoro si apre al **primo `Boards done`** di un programma e parte dal momento in cui è finito il lavoro precedente (fine del programma precedente o ripartenza dopo un fermo). I programmi caricati in distinta che non producono nulla non generano registrazioni. |
 | R2 | **Passaggio di consegne:** se arrivano pannelli del programma B mentre è aperto A, A si chiude all'ora del suo **ultimo pannello** e B parte da lì. |
 | R3 | Quando `done` raggiunge `to do`, la registrazione si chiude su quel pannello. |
-| R4 | `Stop program`, `Stop worklist` ed `Emergency` chiudono la registrazione aperta e aprono **sempre** un fermo, anche senza programmi aperti. Se dall'ultima ripartenza non è uscito nessun pannello, quel tempo va all'ultimo programma avviato, con 0 pannelli (programma interrotto). |
-| R5 | `Start worklist`, `Restart worklist`, `Start program` o un pannello chiudono il fermo. |
+| R4 | Uno stop confermato (R10) chiude la registrazione aperta e apre **sempre** un fermo, anche senza programmi aperti e anche subito dopo l'accensione (`Init Session` → `Emergency` → calibrazione). Se dall'ultima ripartenza non è uscito nessun pannello (programma interrotto), il fermo parte dalla ripartenza: quel tempo è fermo e non nasce una registrazione di lavoro. |
+| R5 | `Start worklist`, `Restart worklist`, `Start program` o un pannello chiudono il fermo (o annullano lo stop non ancora confermato, R10). |
 | R6 | `End Session` chiude tutto senza aprire un fermo. Un `Init Session` senza `End Session` (spegnimento anomalo) chiude ciò che è aperto all'**ora dell'ultimo evento letto**, non all'ora di riaccensione. |
 | R7 | Una registrazione con durata zero e zero pannelli non viene mai inviata a Odoo. |
 | R8 | Il contatore dei pannelli di ogni programma si riallinea al valore `done:` scritto in ogni `Start program`. |
-| R9 | Stati da allarme OSI: si crea lo stato solo se l'allarme dura almeno `max_time` (il controllo oggi commentato). |
+| R9 | Stati da allarme OSI: si crea lo stato solo se l'allarme dura almeno `max_time` di `MSG_TO_MONITOR` (30 s; 0 s per gli allarmi lama), il controllo oggi commentato. |
+| R10 | `Stop program`, `Stop worklist` ed `Emergency` diventano un fermo solo se la macchina **non riparte entro 3 minuti**. Uno stop più breve non spezza la registrazione di lavoro: quel tempo resta lavoro del programma in corso. Più stop ravvicinati formano un solo fermo, che parte dal primo. Vale per tutti i tipi di stop, emergenze comprese. Il fermo compare quindi in Odoo 3 minuti dopo lo stop, con l'ora di inizio vera. |
 
 Le chiamate a Odoo restano quelle di oggi (`create_productivity`, `add_sez_pack`, `close_productivity`,
 `create_wcstate`, `close_wcstate`): cambia solo quando e con quali date vengono fatte.
 
 ### 10.3 Risultato sui log reali
 
-Prototipo in `tools/replay/engine.py` (regole R1–R8), confrontato con `selco.py` sugli stessi log:
+Prototipo in `tools/replay/engine.py` (regole R1–R8 e R10), confrontato con `selco.py` sugli stessi log:
 
-| Log | Algoritmo | Lavoro | Fermo | A tempo zero | Minuti di lavoro senza pannelli | Pannelli | Minuti lavoro | Minuti fermo |
+| Log | Algoritmo | Registrazioni (lavoro / fermo) | Sotto 1 minuto | A tempo zero | Minuti di lavoro senza pannelli | Pannelli | Minuti lavoro | Minuti fermo |
 |---|---|---|---|---|---|---|---|---|
-| EventOsi | attuale | 353 | 47 | 24 | 106 | 2.425 | 1.982 | 912 |
-| | nuovo | 332 | 64 | **2** | **46** | 2.435 | 1.992 | 943 |
-| EvtBack | attuale | 947 | 227 | 42 | 181 | 10.582 | 6.916 | 1.635 |
-| | nuovo | 902 | 263 | **8** | **117** | 10.599 | 6.963 | 1.715 |
-| Event | attuale | 405 | 70 | 18 | 107 | 4.588 | 3.211 | 317 |
-| | nuovo | 386 | 94 | **2** | **56** | 4.603 | 3.226 | 465 |
+| EventOsi | attuale | 400 (353 / 47) | 66 | 24 | 106 | 2.425 | 1.982 | 912 |
+| | nuovo | **321** (305 / 16) | **1** | **1** | **5** | 2.435 | 2.016 | 909 |
+| EvtBack | attuale | 1.174 (947 / 227) | 274 | 42 | 181 | 10.582 | 6.916 | 1.635 |
+| | nuovo | **804** (739 / 65) | **4** | **4** | **0** | 10.599 | 7.055 | 1.596 |
+| Event | attuale | 475 (405 / 70) | 85 | 18 | 107 | 4.588 | 3.211 | 317 |
+| | nuovo | **357** (339 / 18) | **2** | **1** | **0** | 4.603 | 3.277 | 410 |
+| **Totale** | attuale | 2.049 | 425 | 84 | 394 | 17.595 | 12.109 | 2.864 |
+| | nuovo | **1.482 (−28%)** | **7** | **6** | **5** | 17.637 | 12.348 | 2.915 |
 
-- Le registrazioni a tempo zero passano da 84 a 12.
-- I minuti di lavoro assegnati a programmi senza pannelli si dimezzano circa (da 394 a 219).
-- Più registrazioni di fermo e più minuti: sono i fermi che l'algoritmo attuale perde (caso 3).
+- Le registrazioni calano del 28% e quelle sotto il minuto passano da 425 a 7.
+- Nessun fermo di almeno 3 minuti dell'algoritmo R1–R8 va perso con R10 (verificato su tutti e tre i log).
+- Il fermo totale è simile a oggi. I microfermi passano al lavoro, ma si recuperano i fermi che l'algoritmo
+  attuale perde (caso 3) e quelli all'accensione.
 - Pannelli leggermente di più: l'algoritmo attuale scarta i pannelli dei programmi che non ha visto
   partire (`Program … not loaded but boards produced`).
+- Le 6 registrazioni a zero rimaste hanno tutte dei pannelli. Sono tagli fatti in manuale durante un fermo
+  (esempio: 04/06/2026 09:43:08, comandi `IO Force` durante il fermo, poi `Boards done` 4 che completa il
+  programma). Restano, perché portano i pannelli.
 
-Le 12 registrazioni a zero rimaste hanno tutte dei pannelli. Sono tagli fatti in manuale durante un fermo
-(esempio: 04/06/2026 09:43:08, comandi `IO Force` durante il fermo, poi `Boards done` 4 che completa il
-programma). Restano, perché portano i pannelli.
+Scelte valutate e scartate per R4 e R10:
 
-Con il nuovo algoritmo la registrazione di lavoro compare in Odoo al primo pannello, non all'avvio del
-programma: qualche minuto dopo rispetto a oggi.
+| Variante | Registrazioni | Motivo dello scarto |
+|---|---|---|
+| Programma interrotto al fermo solo se l'intervallo supera 3 minuti | – | 16 dei 20 intervalli oltre i 3 minuti contengono taglio vero (pezzi prodotti o metri tagliati in aumento): in un avvio normale il primo pannello esce in mediana dopo 4,5 minuti |
+| Programma interrotto al lavoro solo se ha tagliato | circa +50 | una registrazione di lavoro in più per ogni interruzione con taglio (51 casi in 6 settimane), contro l'obiettivo D13 |
+| Fermi brevi con soglia 5 minuti invece di 3 | −53 rispetto a 3 minuti (stima) | guadagno piccolo, più tempo di fermo contato come lavoro |
 
 ## 11. Casi particolari
 
@@ -491,7 +500,7 @@ programma: qualche minuto dopo rispetto a oggi.
 | F0 | Portare in produzione la correzione di `oi_mrp_label` 12.0.32.0.0 | test del modulo; controllo sulla riga segnalata |
 | F1 | `oi_mrp_label` / `antex_jit_label`: istruzioni di stampa separate dalla stampa, `allocate()` condiviso — nessun cambiamento visibile | test: stessi lavori per ogni caso della tabella 2.2 |
 | F2 | Modulo `antex_label_offline`: metodi RPC, fotografia con impronte, registro, allerte, blocco della stampa manuale | test su `antex12test` |
-| F2b | Logger: lettura incrementale di `Event.log` (§9) e nuovo algoritmo di produttività (§10). Indipendente dalla stampa offline: si può mettere in servizio prima | `tools/replay` sui log reali: nessuna registrazione a tempo zero senza pannelli, stessi pannelli, stessi minuti totali; riavvio del logger e rotazione del log senza righe perse o doppie |
+| F2b | Logger: lettura incrementale di `Event.log` (§9) e nuovo algoritmo di produttività (§10, R1–R10). Indipendente dalla stampa offline: si può mettere in servizio prima | `tools/replay` sui log reali: nessuna registrazione a tempo zero senza pannelli, nessun fermo ≥ 3 minuti perso, pannelli non inferiori a oggi; riavvio del logger e rotazione del log senza righe perse o doppie |
 | F3 | Logger: stampa IPP verso 192.168.20.18 con `offline_print_layout` (solo VPN attiva) | stampa di prova con `TRAY2`, fronte/retro, copie; confronto con la stampa attuale |
 | F4 | Logger: fotografia sulla share, calcolo a VPN giù, registro, sincronizzazione | simulazione di VPN giù (Odoo irraggiungibile) su un lotto di schemi reali |
 | F5 | Messa in servizio su SEZ1 | una settimana di confronto tra registro e stato di Odoo |
@@ -505,9 +514,6 @@ programma: qualche minuto dopo rispetto a oggi.
    turno, quando arrivano i piani nuovi.
 4. Versione di Python e librerie disponibili sul PC Windows (client IPP).
 5. Destinatari delle allerte: solo menu, oppure anche un'attività a un responsabile?
-6. Soglie `max_time` degli allarmi OSI (R9): quelle di `MSG_TO_MONITOR` (30 s, 0 s per le lame) vanno
-   bene? Oggi non sono applicate.
-7. È accettabile che la registrazione di lavoro compaia in Odoo al primo pannello invece che all'avvio del
-   programma (§10.3)?
-8. Tempo tra ripartenza e primo pannello di un programma poi interrotto (R4): all'ultimo programma avviato,
-   come proposto, o al fermo?
+
+Decisi il 30/09/2026 (D13): soglie `max_time` degli allarmi confermate, registrazione di lavoro al primo
+pannello accettata, programma interrotto al fermo (R4), fermi sotto i 3 minuti restano lavoro (R10).
